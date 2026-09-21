@@ -1184,6 +1184,27 @@ describe("subagent discovery", () => {
     }
   });
 
+  it("bundled agents omit model pins while preserving their roles and permissions", async () => {
+    await withIsolatedAgentEnv(async () => {
+      const expected = {
+        scout: { tools: "read, grep, find, ls", thinking: "low", spawnable: undefined },
+        researcher: { tools: "web_search, web_fetch, safe_bash", thinking: "medium", spawnable: undefined },
+        worker: { tools: "read, write, edit, bash, web_search, web_fetch", thinking: "high", spawnable: ["scout", "researcher"] },
+      };
+      for (const [name, fields] of Object.entries(expected)) {
+        const defs = testApi.loadAgentDefaults(name);
+        assert.ok(defs, `expected bundled ${name}`);
+        assert.equal(defs.model, undefined, `${name} must not pin a model`);
+        assert.equal(defs.tools, fields.tools);
+        assert.equal(defs.thinking, fields.thinking);
+        assert.deepEqual(defs.subagentAgents, fields.spawnable);
+        assert.equal(defs.systemPromptMode, "append");
+        assert.equal(defs.autoExit, true);
+        assert.ok(defs.body, `${name} must retain its role instructions`);
+      }
+    });
+  });
+
   it("worker is granted the spawning toolset restricted to scout and researcher", () => {
     const worker = testApi.loadAgentDefaults("worker");
     assert.ok(worker, "expected bundled worker to be discoverable");
@@ -1318,6 +1339,41 @@ describe("subagent discovery", () => {
         parts[toolsIdx + 1].includes("read,write,safe_bash"),
         "expected the tool allowlist as the --tools value",
       );
+    });
+  });
+
+  it("model-less loadouts preserve sandboxing through serialization and resume", () => {
+    withTempDir((d) => {
+      const loadout: SubagentLoadout = {
+        agent: "worker",
+        toolAllowlist: "read,write,bash",
+        model: null,
+        thinking: "high",
+        systemPromptMode: "append",
+        identity: "You are a worker.",
+        spawnable: ["scout", "researcher"],
+        autoExit: true,
+        cwd: null,
+        agentDir: null,
+      };
+      const sessionFile = join(d, "worker.jsonl");
+      writeSubagentLoadout(sessionFile, loadout);
+      const restored = readSubagentLoadout(sessionFile);
+      assert.deepEqual(restored, loadout);
+      for (const candidate of [loadout, restored!]) {
+        const parts: string[] = [];
+        testApi.applySandboxToParts(parts, candidate, { artifactDir: d, name: "worker" });
+        assert.ok(!parts.includes("--model"), "let Pi select the model");
+        assert.ok(!parts.includes("--thinking"), "model-less launches use Pi thinking defaults");
+        assert.doesNotMatch(parts.join(" "), /undefined/);
+        assert.ok(!parts.some((part) => part.includes(":high")));
+        assert.ok(parts.includes("--no-extensions"));
+        const toolsIdx = parts.indexOf("--tools");
+        assert.ok(toolsIdx >= 0);
+        assert.equal(parts[toolsIdx + 1], shellEscape(loadout.toolAllowlist!));
+        const identityIdx = parts.indexOf("--append-system-prompt");
+        assert.ok(identityIdx >= 0, "retain the profile identity");
+      }
     });
   });
 
